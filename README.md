@@ -110,9 +110,3 @@ streamlit run ui/app.py
 
 Set `LLM_PROVIDER` in your `.env` to `anthropic` or `openai`.
 The default model is `claude-sonnet-4-6` (Anthropic) or `gpt-4o` (OpenAI).
-
----
-
-## License
-
-MIT
