@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 import tiktoken
+from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ def count_tokens(text: str, encoding_name: str = _DEFAULT_ENCODING) -> int:
 
 
 def count_tokens_for_documents(
-    documents: list,  # list[langchain_core.documents.Document]
+    documents: list[Document],
     encoding_name: str = _DEFAULT_ENCODING,
 ) -> int:
     """Sum token counts across a list of LangChain Document objects.

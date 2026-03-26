@@ -16,6 +16,9 @@ from src.utils.llm_factory import get_llm
 
 logger = logging.getLogger(__name__)
 
+# Rough character cap: ~12 000 tokens × ~4 chars/token
+_EXTRACTION_TEXT_CAP = 48_000
+
 
 # ---------------------------------------------------------------------------
 # Output schema
@@ -99,8 +102,14 @@ def extract_structured_data(documents: list[Document]) -> DocumentExtraction:
     # Concatenate text; cap at ~12 000 tokens worth of characters to stay
     # within a single prompt without requiring map-reduce here.
     combined = "\n\n".join(d.page_content for d in documents if d.page_content.strip())
-    # Rough character cap: 12 000 tokens × ~4 chars/token
-    combined = combined[:48_000]
+    if len(combined) > _EXTRACTION_TEXT_CAP:
+        logger.warning(
+            "Document text truncated from %d to %d characters for extraction. "
+            "Consider chunking first.",
+            len(combined),
+            _EXTRACTION_TEXT_CAP,
+        )
+        combined = combined[:_EXTRACTION_TEXT_CAP]
 
     llm = get_llm(temperature=0.0)
     structured_llm = llm.with_structured_output(DocumentExtraction)

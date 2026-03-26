@@ -21,6 +21,9 @@ from src.utils.llm_factory import get_llm
 
 logger = logging.getLogger(__name__)
 
+# Character cap per side when sending texts to the LLM (~2 000 tokens each)
+_SEMANTIC_DIFF_TEXT_CAP = 8_000
+
 
 # ---------------------------------------------------------------------------
 # Output schemas
@@ -175,10 +178,8 @@ def _semantic_diff(text_a: str, text_b: str) -> tuple[str, str]:
     Returns:
         Tuple of (semantic_summary, similarity_assessment).
     """
-    # Cap texts to avoid hitting context limits
-    cap = 8_000  # characters (~2 000 tokens each side)
-    text_a_capped = text_a[:cap]
-    text_b_capped = text_b[:cap]
+    text_a_capped = text_a[:_SEMANTIC_DIFF_TEXT_CAP]
+    text_b_capped = text_b[:_SEMANTIC_DIFF_TEXT_CAP]
 
     llm = get_llm(temperature=0.0)
     chain = _SEMANTIC_DIFF_PROMPT | llm | StrOutputParser()

@@ -16,7 +16,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.utils.chunker import chunk_documents
-from src.utils.llm_factory import get_llm
+from src.utils.llm_factory import ChatModel, get_llm
 from src.utils.token_counter import count_tokens_for_documents
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ def summarize_documents(
 # ---------------------------------------------------------------------------
 
 
-def _single_pass_summarize(documents: list[Document], llm, style_phrase: str) -> str:
+def _single_pass_summarize(documents: list[Document], llm: ChatModel, style_phrase: str) -> str:
     """Concatenate all document text and summarise in one LLM call."""
     combined_text = "\n\n".join(d.page_content for d in documents if d.page_content.strip())
     chain = _DIRECT_PROMPT | llm | StrOutputParser()
@@ -126,7 +126,7 @@ def _single_pass_summarize(documents: list[Document], llm, style_phrase: str) ->
 
 def _map_reduce_summarize(
     documents: list[Document],
-    llm,
+    llm: ChatModel,
     style_phrase: str,
     threshold: int,
 ) -> str:

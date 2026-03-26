@@ -41,18 +41,23 @@ ACCEPTED_TYPES = ["pdf", "docx"]
 
 
 def load_uploaded_file(uploaded_file: Any) -> list[Document]:
-    """Save an uploaded Streamlit file to a temp path and parse it."""
+    """Save an uploaded Streamlit file to a temp path, parse it, then clean up."""
     suffix = Path(uploaded_file.name).suffix.lower()
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(uploaded_file.getvalue())
-        tmp_path = Path(tmp.name)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(uploaded_file.getvalue())
+            tmp_path = Path(tmp.name)
 
-    if suffix == ".pdf":
-        return load_pdf(tmp_path)
-    elif suffix == ".docx":
-        return load_docx(tmp_path)
-    else:
-        raise ValueError(f"Unsupported file type: {suffix}")
+        if suffix == ".pdf":
+            return load_pdf(tmp_path)
+        elif suffix == ".docx":
+            return load_docx(tmp_path)
+        else:
+            raise ValueError(f"Unsupported file type: {suffix}")
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
 
 
 def doc_preview(docs: list[Document], max_chars: int = 2_000) -> str:
@@ -140,7 +145,11 @@ with tab_analyse:
                 st.error(f"Failed to parse file: {exc}")
                 st.stop()
 
-        total_pages = docs[-1].metadata.get("total_pages") or len(docs)
+        total_elements = (
+            docs[-1].metadata.get("total_pages")
+            or docs[-1].metadata.get("total_sections")
+            or len(docs)
+        )
         st.success(
             f"Loaded **{uploaded.name}** — "
             f"{len(docs)} section(s) / page(s), "

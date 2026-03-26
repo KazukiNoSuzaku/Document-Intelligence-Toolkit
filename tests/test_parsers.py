@@ -19,6 +19,7 @@ from langchain_core.documents import Document
 from src.document_parsers.pdf_parser import (
     _clean_metadata,
     _validate_path,
+    extract_tables_from_pdf,
     load_pdf,
 )
 from src.document_parsers.docx_parser import (
@@ -283,3 +284,32 @@ class TestExtractTablesFromDocx:
         doc.save(str(path))
         tables = extract_tables_from_docx(path)
         assert tables == []
+
+
+# ---------------------------------------------------------------------------
+# extract_tables_from_pdf tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractTablesFromPdf:
+    def test_returns_list(self, sample_pdf: Path) -> None:
+        tables = extract_tables_from_pdf(sample_pdf)
+        assert isinstance(tables, list)
+
+    def test_table_dict_structure(self, sample_pdf: Path) -> None:
+        """Each table entry must have page, table_index, and data keys."""
+        tables = extract_tables_from_pdf(sample_pdf)
+        for tbl in tables:
+            assert "page" in tbl
+            assert "table_index" in tbl
+            assert "data" in tbl
+
+    def test_raises_for_missing_file(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            extract_tables_from_pdf(tmp_path / "missing.pdf")
+
+    def test_raises_for_wrong_extension(self, tmp_path: Path) -> None:
+        p = tmp_path / "file.txt"
+        p.write_text("not a pdf")
+        with pytest.raises(ValueError):
+            extract_tables_from_pdf(p)
