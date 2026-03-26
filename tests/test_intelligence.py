@@ -20,7 +20,11 @@ from src.intelligence.comparator import (
     compare_documents,
     compare_texts,
 )
-from src.intelligence.extractor import DocumentExtraction, extract_structured_data
+from src.intelligence.extractor import (
+    DocumentExtraction,
+    extract_structured_data,
+    validate_extraction,
+)
 from src.intelligence.summarizer import summarize_documents
 
 
@@ -163,6 +167,209 @@ class TestExtractStructuredData:
         assert obj.document_type == "report"
         assert obj.parties == []
         assert isinstance(obj.summary, str)
+
+
+# ---------------------------------------------------------------------------
+# extractor — validate_extraction (guardrails)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateExtraction:
+    def _good_extraction(self) -> DocumentExtraction:
+        return DocumentExtraction(
+            title="Service Agreement",
+            document_type="contract",
+            parties=["Acme Corp"],
+            dates=["2024-01-15"],
+            key_topics=["software development"],
+            key_clauses=["payment terms"],
+            summary="A software development contract between two companies for Q1 delivery.",
+        )
+
+    def test_valid_extraction_returns_no_issues(self) -> None:
+        assert validate_extraction(self._good_extraction()) == []
+
+    def test_empty_title_flagged(self) -> None:
+        obj = self._good_extraction()
+        obj.title = ""
+        issues = validate_extraction(obj)
+        assert any("title" in i for i in issues)
+
+    def test_empty_document_type_flagged(self) -> None:
+        obj = self._good_extraction()
+        obj.document_type = ""
+        issues = validate_extraction(obj)
+        assert any("document_type" in i for i in issues)
+
+    def test_short_summary_flagged(self) -> None:
+        obj = self._good_extraction()
+        obj.summary = "Short."
+        issues = validate_extraction(obj)
+        assert any("summary" in i for i in issues)
+
+    def test_empty_key_topics_flagged(self) -> None:
+        obj = self._good_extraction()
+        obj.key_topics = []
+        issues = validate_extraction(obj)
+        assert any("key_topics" in i for i in issues)
+
+    def test_multiple_issues_all_reported(self) -> None:
+        obj = DocumentExtraction(
+            title="",
+            document_type="",
+            summary="x",
+            key_topics=[],
+        )
+        issues = validate_extraction(obj)
+        assert len(issues) == 4
+
+
+class TestWhitespaceStripping:
+    def test_model_validator_strips_fields(self) -> None:
+        obj = DocumentExtraction(
+            title="  My Title  ",
+            document_type="  report  ",
+            parties=["  Alice  ", "  ", "Bob"],
+            dates=["  2024-01-01  "],
+            key_topics=["  AI  "],
+            key_clauses=["  clause 1  "],
+            summary="  A summary.  ",
+        )
+        assert obj.title == "My Title"
+        assert obj.document_type == "report"
+        assert obj.parties == ["Alice", "Bob"]
+        assert obj.dates == ["2024-01-01"]
+        assert obj.key_topics == ["AI"]
+        assert obj.key_clauses == ["clause 1"]
+        assert obj.summary == "A summary."
+
+    def test_empty_strings_removed_from_lists(self) -> None:
+        obj = DocumentExtraction(
+            title="Title",
+            document_type="report",
+            parties=["", "  ", "Alice"],
+            key_topics=["topic"],
+            summary="A valid summary sentence for the document.",
+        )
+        assert obj.parties == ["Alice"]
+
+
+class TestRetryWithFeedback:
+    @patch("src.intelligence.extractor.get_llm")
+    def test_retries_on_quality_failure_then_succeeds(self, mock_get_llm: MagicMock) -> None:
+        """LLM returns a bad extraction first, then a good one on retry."""
+        bad_result = DocumentExtraction(
+            title="",
+            document_type="contract",
+            parties=["Acme Corp"],
+            dates=[],
+            key_topics=["software"],
+            key_clauses=[],
+            summary="A contract.",  # too short
+        )
+        good_result = DocumentExtraction(
+            title="Software Services Agreement",
+            document_type="contract",
+            parties=["Acme Corp"],
+            dates=["2024-01-15"],
+            key_topics=["software development"],
+            key_clauses=["payment terms"],
+            summary="A software services contract between Acme Corp and a provider.",
+        )
+
+        mock_llm = MagicMock()
+        mock_structured = MagicMock()
+
+        # First call returns bad, second returns good
+        mock_chain = MagicMock()
+        mock_chain.invoke.side_effect = [bad_result, good_result]
+        mock_structured.__or__ = MagicMock(return_value=mock_chain)
+        mock_llm.with_structured_output.return_value = mock_structured
+        mock_get_llm.return_value = mock_llm
+
+        with patch("src.intelligence.extractor._EXTRACTION_PROMPT") as mp1, \
+             patch("src.intelligence.extractor._RETRY_PROMPT") as mp2:
+            mp1.__or__ = MagicMock(return_value=mock_chain)
+            mp2.__or__ = MagicMock(return_value=mock_chain)
+            result = extract_structured_data([SHORT_DOC], max_retries=2)
+
+        assert result.title == "Software Services Agreement"
+        assert mock_chain.invoke.call_count == 2
+
+    @patch("src.intelligence.extractor.get_llm")
+    def test_returns_best_effort_after_max_retries(self, mock_get_llm: MagicMock) -> None:
+        """If all retries still fail quality checks, return the last result."""
+        bad_result = DocumentExtraction(
+            title="",
+            document_type="",
+            parties=[],
+            dates=[],
+            key_topics=[],
+            key_clauses=[],
+            summary="Bad.",
+        )
+
+        mock_llm = MagicMock()
+        mock_structured = MagicMock()
+        mock_chain = MagicMock()
+        mock_chain.invoke.return_value = bad_result
+        mock_structured.__or__ = MagicMock(return_value=mock_chain)
+        mock_llm.with_structured_output.return_value = mock_structured
+        mock_get_llm.return_value = mock_llm
+
+        with patch("src.intelligence.extractor._EXTRACTION_PROMPT") as mp1, \
+             patch("src.intelligence.extractor._RETRY_PROMPT") as mp2:
+            mp1.__or__ = MagicMock(return_value=mock_chain)
+            mp2.__or__ = MagicMock(return_value=mock_chain)
+            result = extract_structured_data([SHORT_DOC], max_retries=1)
+
+        # Should have tried initial + 1 retry = 2 calls
+        assert mock_chain.invoke.call_count == 2
+        # Still returns the best-effort result
+        assert isinstance(result, DocumentExtraction)
+
+    @patch("src.intelligence.extractor.get_llm")
+    def test_no_retry_when_first_attempt_passes(self, mock_get_llm: MagicMock) -> None:
+        """If the first attempt passes validation, no retry should occur."""
+        good_result = DocumentExtraction(
+            title="Agreement",
+            document_type="contract",
+            parties=["Acme"],
+            dates=["2024-01-15"],
+            key_topics=["software"],
+            key_clauses=[],
+            summary="A full and detailed summary of the agreement between parties.",
+        )
+
+        mock_llm = MagicMock()
+        mock_structured = MagicMock()
+        mock_chain = MagicMock()
+        mock_chain.invoke.return_value = good_result
+        mock_structured.__or__ = MagicMock(return_value=mock_chain)
+        mock_llm.with_structured_output.return_value = mock_structured
+        mock_get_llm.return_value = mock_llm
+
+        with patch("src.intelligence.extractor._EXTRACTION_PROMPT") as mp:
+            mp.__or__ = MagicMock(return_value=mock_chain)
+            result = extract_structured_data([SHORT_DOC])
+
+        assert mock_chain.invoke.call_count == 1
+        assert result.title == "Agreement"
+
+    @patch("src.intelligence.extractor.get_llm")
+    def test_raises_if_llm_returns_none(self, mock_get_llm: MagicMock) -> None:
+        mock_llm = MagicMock()
+        mock_structured = MagicMock()
+        mock_chain = MagicMock()
+        mock_chain.invoke.return_value = None
+        mock_structured.__or__ = MagicMock(return_value=mock_chain)
+        mock_llm.with_structured_output.return_value = mock_structured
+        mock_get_llm.return_value = mock_llm
+
+        with patch("src.intelligence.extractor._EXTRACTION_PROMPT") as mp:
+            mp.__or__ = MagicMock(return_value=mock_chain)
+            with pytest.raises(RuntimeError, match="returned None"):
+                extract_structured_data([SHORT_DOC])
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,10 @@
 
 Uses LangChain's ``with_structured_output`` (tool-calling under the hood) so
 the LLM always returns a validated Pydantic model — no manual JSON parsing.
+
+Includes a retry-with-feedback guardrail: if the initial extraction has quality
+issues (empty required fields, suspiciously short summary, etc.) the validation
+errors are fed back to the LLM for a corrective second attempt.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ import logging
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.utils.llm_factory import get_llm
 
@@ -18,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Rough character cap: ~12 000 tokens × ~4 chars/token
 _EXTRACTION_TEXT_CAP = 48_000
+
+# Maximum retry attempts when quality validation fails
+_MAX_RETRIES = 2
 
 
 # ---------------------------------------------------------------------------
@@ -55,9 +62,49 @@ class DocumentExtraction(BaseModel):
     )
     summary: str = Field(description="One-paragraph summary of the document's purpose and content.")
 
+    @model_validator(mode="after")
+    def _strip_whitespace(self) -> DocumentExtraction:
+        """Normalise whitespace on string fields."""
+        self.title = self.title.strip()
+        self.document_type = self.document_type.strip()
+        self.summary = self.summary.strip()
+        self.parties = [p.strip() for p in self.parties if p.strip()]
+        self.dates = [d.strip() for d in self.dates if d.strip()]
+        self.key_topics = [t.strip() for t in self.key_topics if t.strip()]
+        self.key_clauses = [c.strip() for c in self.key_clauses if c.strip()]
+        return self
+
 
 # ---------------------------------------------------------------------------
-# Prompt
+# Quality validation (guardrails)
+# ---------------------------------------------------------------------------
+
+
+def validate_extraction(result: DocumentExtraction) -> list[str]:
+    """Check extraction quality beyond schema conformance.
+
+    Returns a list of human-readable issue descriptions. An empty list
+    means the extraction passed all quality checks.
+    """
+    issues: list[str] = []
+
+    if not result.title:
+        issues.append("title is empty — infer a title from the document content.")
+    if not result.document_type:
+        issues.append("document_type is empty — classify the document (e.g. contract, report).")
+    if not result.summary or len(result.summary) < 30:
+        issues.append(
+            "summary is too short — provide at least one full sentence describing "
+            "the document's purpose and content."
+        )
+    if not result.key_topics:
+        issues.append("key_topics is empty — identify at least one topic or theme.")
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Prompts
 # ---------------------------------------------------------------------------
 
 _EXTRACTION_PROMPT = ChatPromptTemplate.from_messages(
@@ -72,35 +119,119 @@ _EXTRACTION_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+_RETRY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an expert document analyst. A previous extraction attempt had quality "
+            "issues. Fix ONLY the problems listed below while keeping the rest of the "
+            "extraction intact. Be precise and factual — do not invent information.",
+        ),
+        ("human", "Document text:\n\n{text}"),
+        (
+            "human",
+            "Your previous extraction had these issues:\n{feedback}\n\n"
+            "Please produce a corrected extraction that addresses every issue listed above.",
+        ),
+    ]
+)
+
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def extract_structured_data(documents: list[Document]) -> DocumentExtraction:
+def extract_structured_data(
+    documents: list[Document],
+    max_retries: int = _MAX_RETRIES,
+) -> DocumentExtraction:
     """Extract structured metadata and key information from a list of Documents.
 
-    All documents are concatenated (up to ~12 000 tokens of combined text) and
-    passed to the LLM in a single extraction call.  For very large corpora,
-    chunk first with :func:`src.utils.chunker.chunk_documents` and pass a
-    representative subset.
+    Includes a guardrail loop: after each LLM call the result is validated for
+    quality. If issues are found, the validation feedback is sent back to the
+    LLM for a corrective attempt (up to ``max_retries`` times).
 
     Args:
         documents: LangChain Documents to analyse.
+        max_retries: Maximum number of retry attempts on quality failure.
 
     Returns:
         A :class:`DocumentExtraction` Pydantic model with extracted fields.
 
     Raises:
         ValueError: If ``documents`` is empty.
-        RuntimeError: If the LLM fails to return a valid structured response.
+        RuntimeError: If the LLM fails to return a valid structured response
+            after all attempts.
     """
     if not documents:
         raise ValueError("documents list must not be empty.")
 
-    # Concatenate text; cap at ~12 000 tokens worth of characters to stay
-    # within a single prompt without requiring map-reduce here.
+    combined = _prepare_text(documents)
+    llm = get_llm(temperature=0.0)
+    structured_llm = llm.with_structured_output(DocumentExtraction)
+
+    # --- First attempt ---
+    result = _invoke_chain(
+        _EXTRACTION_PROMPT | structured_llm, {"text": combined}, attempt=1
+    )
+    issues = validate_extraction(result)
+
+    if not issues:
+        logger.info(
+            "Extraction complete (attempt 1): type='%s', parties=%d, topics=%d.",
+            result.document_type,
+            len(result.parties),
+            len(result.key_topics),
+        )
+        return result
+
+    # --- Retry loop with feedback ---
+    for attempt in range(2, max_retries + 2):
+        feedback = "\n".join(f"- {issue}" for issue in issues)
+        logger.warning(
+            "Extraction attempt %d had %d quality issue(s): %s. Retrying with feedback.",
+            attempt - 1,
+            len(issues),
+            feedback,
+        )
+
+        retry_chain = _RETRY_PROMPT | structured_llm
+        result = _invoke_chain(
+            retry_chain,
+            {"text": combined, "feedback": feedback},
+            attempt=attempt,
+        )
+        issues = validate_extraction(result)
+
+        if not issues:
+            logger.info(
+                "Extraction complete (attempt %d): type='%s', parties=%d, topics=%d.",
+                attempt,
+                result.document_type,
+                len(result.parties),
+                len(result.key_topics),
+            )
+            return result
+
+    # Exhausted retries — return best effort with a warning
+    remaining = "\n".join(f"- {issue}" for issue in issues)
+    logger.warning(
+        "Extraction still has issues after %d attempt(s). Returning best effort. "
+        "Remaining issues:\n%s",
+        max_retries + 1,
+        remaining,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _prepare_text(documents: list[Document]) -> str:
+    """Concatenate document text with a character cap."""
     combined = "\n\n".join(d.page_content for d in documents if d.page_content.strip())
     if len(combined) > _EXTRACTION_TEXT_CAP:
         logger.warning(
@@ -110,21 +241,21 @@ def extract_structured_data(documents: list[Document]) -> DocumentExtraction:
             _EXTRACTION_TEXT_CAP,
         )
         combined = combined[:_EXTRACTION_TEXT_CAP]
+    return combined
 
-    llm = get_llm(temperature=0.0)
-    structured_llm = llm.with_structured_output(DocumentExtraction)
-    chain = _EXTRACTION_PROMPT | structured_llm
 
+def _invoke_chain(chain, inputs: dict, attempt: int) -> DocumentExtraction:
+    """Invoke a chain and handle failures gracefully."""
     try:
-        result: DocumentExtraction = chain.invoke({"text": combined})
+        result = chain.invoke(inputs)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Structured extraction failed: %s", exc)
-        raise RuntimeError(f"Extraction failed: {exc}") from exc
+        logger.error("Structured extraction failed on attempt %d: %s", attempt, exc)
+        raise RuntimeError(f"Extraction failed on attempt {attempt}: {exc}") from exc
 
-    logger.info(
-        "Extraction complete: type='%s', parties=%d, topics=%d.",
-        result.document_type,
-        len(result.parties),
-        len(result.key_topics),
-    )
+    if result is None:
+        raise RuntimeError(
+            f"LLM returned None on attempt {attempt}. "
+            "The model may not support structured output."
+        )
+
     return result
