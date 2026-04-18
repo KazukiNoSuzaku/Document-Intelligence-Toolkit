@@ -18,6 +18,18 @@ _ANTHROPIC_DEFAULT = "claude-sonnet-4-6"
 _OPENAI_DEFAULT = "gpt-4o"
 
 
+def has_api_key() -> bool:
+    """Return True if an API key for the configured provider is present.
+
+    Used by intelligence modules to decide whether to use LLM-powered or
+    rule-based fallback processing.
+    """
+    provider = os.getenv("LLM_PROVIDER", "anthropic").lower().strip()
+    if provider == "openai":
+        return bool(os.getenv("OPENAI_API_KEY", "").strip())
+    return bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
+
+
 def get_llm(temperature: float = 0.0) -> ChatModel:
     """Return a configured chat model based on environment variables.
 

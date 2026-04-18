@@ -17,7 +17,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from src.utils.llm_factory import get_llm
+from src.utils.llm_factory import get_llm, has_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -175,9 +175,14 @@ def _exact_diff(text_a: str, text_b: str) -> ExactDiffStats:
 def _semantic_diff(text_a: str, text_b: str) -> tuple[str, str]:
     """Call the LLM to produce a narrative diff and similarity rating.
 
+    Falls back to a rule-based summary when no API key is configured.
+
     Returns:
         Tuple of (semantic_summary, similarity_assessment).
     """
+    if not has_api_key():
+        return _rule_based_diff_summary(text_a, text_b)
+
     text_a_capped = text_a[:_SEMANTIC_DIFF_TEXT_CAP]
     text_b_capped = text_b[:_SEMANTIC_DIFF_TEXT_CAP]
 
@@ -194,6 +199,41 @@ def _semantic_diff(text_a: str, text_b: str) -> tuple[str, str]:
     similarity = _extract_similarity(raw)
     logger.info("Semantic diff complete. Similarity: '%s'.", similarity)
     return raw, similarity
+
+
+def _rule_based_diff_summary(text_a: str, text_b: str) -> tuple[str, str]:
+    """Produce a deterministic diff summary without any LLM call."""
+    lines_a = set(text_a.splitlines())
+    lines_b = set(text_b.splitlines())
+
+    added = [l for l in lines_b - lines_a if l.strip()]
+    removed = [l for l in lines_a - lines_b if l.strip()]
+
+    parts: list[str] = []
+    if not added and not removed:
+        parts.append("The documents appear identical.")
+        similarity = "identical"
+    else:
+        if added:
+            parts.append(f"Lines added ({len(added)}): " + " | ".join(added[:3])
+                         + ("…" if len(added) > 3 else ""))
+        if removed:
+            parts.append(f"Lines removed ({len(removed)}): " + " | ".join(removed[:3])
+                         + ("…" if len(removed) > 3 else ""))
+        total = len(added) + len(removed)
+        if total <= 2:
+            similarity = "minor changes"
+        elif total <= 10:
+            similarity = "moderate changes"
+        else:
+            similarity = "significant changes"
+        parts.append(
+            f"Overall: {similarity}. "
+            "(Semantic analysis requires an API key — configure ANTHROPIC_API_KEY or "
+            "OPENAI_API_KEY in your .env for a detailed narrative.)"
+        )
+
+    return "\n".join(parts), similarity
 
 
 def _extract_similarity(text: str) -> str:

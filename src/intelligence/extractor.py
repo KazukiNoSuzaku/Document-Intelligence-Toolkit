@@ -6,17 +6,21 @@ the LLM always returns a validated Pydantic model — no manual JSON parsing.
 Includes a retry-with-feedback guardrail: if the initial extraction has quality
 issues (empty required fields, suspiciously short summary, etc.) the validation
 errors are fed back to the LLM for a corrective second attempt.
+
+When no API key is configured, falls back to deterministic rule-based extraction
+using regex and keyword heuristics — no LLM required.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field, model_validator
 
-from src.utils.llm_factory import get_llm
+from src.utils.llm_factory import get_llm, has_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +172,11 @@ def extract_structured_data(
         raise ValueError("documents list must not be empty.")
 
     combined = _prepare_text(documents)
+
+    if not has_api_key():
+        logger.info("No API key found — using rule-based extraction fallback.")
+        return _rule_based_extract(combined)
+
     llm = get_llm(temperature=0.0)
     structured_llm = llm.with_structured_output(DocumentExtraction)
 
@@ -242,6 +251,98 @@ def _prepare_text(documents: list[Document]) -> str:
         )
         combined = combined[:_EXTRACTION_TEXT_CAP]
     return combined
+
+
+def _rule_based_extract(text: str) -> DocumentExtraction:
+    """Deterministic fallback extraction using regex and keyword heuristics."""
+
+    # --- Title: first non-empty line, capped at 120 chars ---
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    title = lines[0][:120] if lines else "Untitled Document"
+
+    # --- Document type: keyword matching ---
+    lower = text.lower()
+    type_keywords: list[tuple[str, str]] = [
+        ("contract", "contract"),
+        ("agreement", "contract"),
+        ("invoice", "invoice"),
+        ("receipt", "invoice"),
+        ("report", "report"),
+        ("policy", "policy"),
+        ("proposal", "proposal"),
+        ("letter", "letter"),
+        ("memo", "memo"),
+        ("nda", "non-disclosure agreement"),
+        ("non-disclosure", "non-disclosure agreement"),
+        ("research", "research paper"),
+        ("abstract", "research paper"),
+    ]
+    document_type = "document"
+    for keyword, label in type_keywords:
+        if keyword in lower:
+            document_type = label
+            break
+
+    # --- Dates: ISO, US long form, and numeric formats ---
+    date_patterns = [
+        r"\b\d{4}-\d{2}-\d{2}\b",
+        r"\b(?:January|February|March|April|May|June|July|August|September|"
+        r"October|November|December)\s+\d{1,2},?\s+\d{4}\b",
+        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+    ]
+    dates: list[str] = []
+    for pattern in date_patterns:
+        dates.extend(re.findall(pattern, text, re.IGNORECASE))
+    dates = list(dict.fromkeys(dates))[:10]  # deduplicate, cap at 10
+
+    # --- Parties: "between X and Y", "by and between X and Y" patterns ---
+    parties: list[str] = []
+    party_patterns = [
+        r"between\s+([A-Z][A-Za-z\s,\.]+?)\s+and\s+([A-Z][A-Za-z\s,\.]+?)(?:\s*[\(\,\.]|$)",
+        r"(?:by|with)\s+([A-Z][A-Za-z\s]+(?:Inc|LLC|Ltd|Corp|Company|Co|Group|Solutions|Services)\.?)",
+        r"([A-Z][A-Za-z\s]+(?:Inc|LLC|Ltd|Corp|Company|Co|Group|Solutions|Services)\.?)\s+\(",
+    ]
+    for pattern in party_patterns:
+        for match in re.finditer(pattern, text):
+            parties.extend(g.strip() for g in match.groups() if g and g.strip())
+    parties = list(dict.fromkeys(p for p in parties if 2 < len(p) < 80))[:8]
+
+    # --- Key topics: frequent capitalised noun phrases and domain keywords ---
+    domain_terms = [
+        "payment", "termination", "liability", "indemnification", "confidentiality",
+        "intellectual property", "warranty", "arbitration", "jurisdiction",
+        "deliverable", "milestone", "scope", "pricing", "governing law",
+        "force majeure", "amendment", "assignment", "data privacy", "gdpr",
+        "compliance", "audit", "penalty", "interest", "notice period",
+    ]
+    key_topics = [term for term in domain_terms if term in lower][:8]
+    if not key_topics:
+        # Fallback: extract capitalised multi-word phrases
+        caps = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", text)
+        key_topics = list(dict.fromkeys(caps))[:6]
+
+    # --- Summary: first 3 sentences ---
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+    summary = " ".join(sentences[:3]) if sentences else text[:300]
+
+    result = DocumentExtraction(
+        title=title,
+        document_type=document_type,
+        parties=parties,
+        dates=dates,
+        key_topics=key_topics,
+        key_clauses=[],
+        summary=summary,
+    )
+    logger.info(
+        "Rule-based extraction complete: type='%s', parties=%d, dates=%d, topics=%d.",
+        result.document_type,
+        len(result.parties),
+        len(result.dates),
+        len(result.key_topics),
+    )
+    return result
 
 
 def _invoke_chain(chain, inputs: dict, attempt: int) -> DocumentExtraction:

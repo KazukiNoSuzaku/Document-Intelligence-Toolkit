@@ -22,6 +22,7 @@ from src.document_parsers.pdf_parser import load_pdf
 from src.intelligence.comparator import compare_documents
 from src.intelligence.extractor import DocumentExtraction, extract_structured_data
 from src.intelligence.summarizer import summarize_documents
+from src.utils.llm_factory import has_api_key
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -121,6 +122,15 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 
 st.title("Document Intelligence Toolkit")
+
+if not has_api_key():
+    st.warning(
+        "**No API key detected** — running in rule-based fallback mode. "
+        "Summaries are extractive, extraction uses regex heuristics, and "
+        "comparison is text-diff only. "
+        "Add `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` to your `.env` for full LLM features.",
+        icon="⚠️",
+    )
 
 tab_analyse, tab_compare = st.tabs(["📋 Analyse", "🔀 Compare"])
 

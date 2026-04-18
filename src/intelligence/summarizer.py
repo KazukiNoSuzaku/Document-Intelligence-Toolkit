@@ -15,8 +15,10 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
+import re
+
 from src.utils.chunker import chunk_documents
-from src.utils.llm_factory import ChatModel, get_llm
+from src.utils.llm_factory import ChatModel, get_llm, has_api_key
 from src.utils.token_counter import count_tokens_for_documents
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,10 @@ def summarize_documents(
     if not documents:
         return ""
 
+    if not has_api_key():
+        logger.info("No API key found — using extractive summarization fallback.")
+        return _extractive_summarize(documents, style)
+
     threshold = (
         map_reduce_threshold
         if map_reduce_threshold is not None
@@ -108,6 +114,33 @@ def summarize_documents(
         return _single_pass_summarize(documents, llm, style_phrase)
     else:
         return _map_reduce_summarize(documents, llm, style_phrase, threshold)
+
+
+# ---------------------------------------------------------------------------
+# Rule-based fallback
+# ---------------------------------------------------------------------------
+
+
+def _extractive_summarize(documents: list[Document], style: str) -> str:
+    """Return an extractive summary without any LLM call.
+
+    Splits text into sentences and returns the first N depending on style.
+    For 'bullet' style, formats them as a markdown list.
+    """
+    combined = " ".join(d.page_content for d in documents if d.page_content.strip())
+    sentences = re.split(r"(?<=[.!?])\s+", combined.strip())
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+    n = {"concise": 3, "detailed": 10, "bullet": 5}.get(style, 3)
+    selected = sentences[:n]
+
+    if not selected:
+        return combined[:500]
+
+    if style == "bullet":
+        return "\n".join(f"- {s}" for s in selected)
+
+    return " ".join(selected)
 
 
 # ---------------------------------------------------------------------------
