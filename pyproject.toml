@@ -25,6 +25,7 @@ dependencies = [
     "deepdiff>=7.0.0",
     # UI
     "streamlit>=1.37.0",
+    "customtkinter>=5.2.0",
     # Config & environment
     "python-dotenv>=1.0.0",
     # Data handling
