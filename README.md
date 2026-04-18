@@ -1,6 +1,6 @@
 # Document Intelligence Toolkit
 
-An open-source, enterprise-grade toolkit for intelligent document processing. Ingests PDFs and Word documents, extracts structured data, generates executive summaries, and performs semantic document comparison — all powered by LangChain and LLMs.
+An open-source, enterprise-grade toolkit for intelligent document processing. Ingests PDFs and Word documents, extracts structured data, generates executive summaries, and performs semantic document comparison — powered by LangChain and LLMs, with full offline rule-based fallbacks when no API key is present.
 
 ---
 
@@ -25,13 +25,15 @@ document-intelligence-toolkit/
 │       └── llm_factory.py         # Provider-agnostic LLM factory (Anthropic / OpenAI)
 │
 ├── ui/
-│   └── app.py                     # Streamlit two-tab UI (Analyse + Compare)
+│   ├── app.py                     # Streamlit two-tab web UI (Analyse + Compare)
+│   └── desktop_app.py             # Native Windows desktop app (customtkinter, Anthropic design)
 │
 ├── tests/
 │   ├── test_parsers.py            # PDF + DOCX parser unit tests (synthetic fixtures)
 │   ├── test_chunker.py            # Chunker + token counter unit tests
 │   ├── test_intelligence.py       # Summarizer / extractor / comparator (mocked LLM)
-│   └── test_smoke.py              # End-to-end pipeline smoke test (mocked LLM)
+│   ├── test_smoke.py              # End-to-end pipeline smoke test (mocked LLM)
+│   └── test_llm_factory.py        # LLM factory — provider/model/temperature tests
 │
 ├── .env.template                  # API key config template — copy to .env
 ├── .gitignore
@@ -47,9 +49,11 @@ document-intelligence-toolkit/
 |---|---|
 | Token limit handling | `RecursiveCharacterTextSplitter` + Map-Reduce summarization (auto-selected) |
 | Structured extraction | `llm.with_structured_output(DocumentExtraction)` — tool-calling + Pydantic v2 |
+| Extraction reliability | Retry-with-feedback loop: validation errors fed back to LLM for correction |
 | Semantic diffing | LLM narrative diff with similarity label extraction |
 | Exact text diffing | `deepdiff` on document lines before LLM analysis |
 | Provider flexibility | `LLM_PROVIDER` / `LLM_MODEL` env vars; `llm_factory.py` is the single switch point |
+| Offline / no API key | Rule-based fallbacks in all three intelligence modules (regex, extractive, set-diff) |
 | Malformed PDFs | pdfplumber → pypdf fallback; `try/except` guards on every page |
 | Large document extraction | Text capped at ~12 000 tokens; use chunker upstream for very large corpora |
 
@@ -62,8 +66,10 @@ document-intelligence-toolkit/
 | 1 | ✅ Done | Project scaffolding, `pyproject.toml`, `.env.template`, `.gitignore` |
 | 2 | ✅ Done | PDF + DOCX parsers, `chunker.py`, `token_counter.py`, parser tests |
 | 3 | ✅ Done | `llm_factory.py`, `summarizer.py`, `extractor.py`, `comparator.py`, intelligence tests |
-| 4 | ✅ Done | Streamlit two-tab UI (`ui/app.py`) |
-| 5 | ✅ Done | README polish, end-to-end smoke test |
+| 4 | ✅ Done | Streamlit two-tab web UI (`ui/app.py`) |
+| 5 | ✅ Done | README polish, end-to-end smoke test, CI/CD pipeline |
+| 6 | ✅ Done | Retry-with-feedback guardrails, rule-based offline fallbacks |
+| 7 | ✅ Done | Native Windows desktop app (`ui/desktop_app.py`) |
 
 ---
 
@@ -88,8 +94,11 @@ cp .env.template .env
 # 5. Run the test suite (no API key required)
 pytest
 
-# 6. Launch the UI
+# 6a. Launch the web UI
 streamlit run ui/app.py
+
+# 6b. Or launch the native Windows desktop app (works offline, no API key needed)
+python ui/desktop_app.py
 ```
 
 ## Environment Variables
@@ -105,6 +114,18 @@ streamlit run ui/app.py
 | `MAP_REDUCE_THRESHOLD` | `6000` | Token count above which Map-Reduce is used |
 
 ---
+
+## Offline / No API Key Mode
+
+All three intelligence modules automatically fall back to deterministic rule-based processing when no API key is detected:
+
+| Feature | LLM mode | Offline fallback |
+|---|---|---|
+| Summarisation | Map-Reduce LLM summary | Extractive: first N sentences by style |
+| Extraction | `with_structured_output` + retry loop | Regex dates, keyword doc-type, heuristic parties |
+| Comparison | LLM semantic narrative | Set-diff of lines + similarity label |
+
+The desktop app (`ui/desktop_app.py`) is designed specifically for offline use.
 
 ## LLM Provider Configuration
 
